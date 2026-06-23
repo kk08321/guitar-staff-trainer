@@ -152,8 +152,7 @@ h1 {
 }
 
 .previewNote {
-  opacity: 0.28;
-  transform: translateX(24px);
+  opacity: 0.26;
 }
 
 .previewNote .noteHead,
@@ -163,6 +162,14 @@ h1 {
 
 .previewNote .stem {
   stroke: #667173;
+}
+
+.previewNote2 {
+  opacity: 0.2;
+}
+
+.previewNote3 {
+  opacity: 0.14;
 }
 
 .controlBand {

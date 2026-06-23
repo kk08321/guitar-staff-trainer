@@ -1,53 +1,53 @@
 # Guitar Staff Trainer
 
-A browser-based trainer for mapping staff notation to classical guitar fretboard positions.
+五線譜の音符とクラシックギターの指板上の位置を対応づけて練習できる、ブラウザ向けトレーニングアプリです。
 
-## Overview
+## 概要
 
-Guitar Staff Trainer helps classical guitar beginners practice reading standard staff notation and locating the corresponding string and fret on the guitar fretboard.
+Guitar Staff Trainer は、クラシックギター初学者が五線譜を読み、対応する弦とフレットを指板上で見つける練習をするためのアプリです。
 
-The app shows a random note on the staff. Tap the matching string and fret position on the fretboard to answer. When the answer is correct, the next note moves in and the exercise continues.
+画面にはランダムな音符が表示されます。対応する弦とフレット位置を指板上でタップして回答します。正解すると次の音符に進み、練習を続けられます。
 
-## Features
+## 主な機能
 
-- Staff notation quiz for classical guitar
-- Fretboard UI with open strings and frets 1-12
-- Treble staff display with guitar transposition handling
-- Multiple practice ranges:
-  - Basic: lower beginner range
-  - Standard: low-position notes from 6th string open to 1st string 4th fret
-  - Wide: broader range up to the 12th fret
-- Shuffled question deck to reduce short-term repetition
-- Accuracy and streak tracking
-- Responsive browser UI
+- クラシックギター向けの五線譜クイズ
+- 開放弦と 1-12 フレットに対応した指板 UI
+- ギターの移調を考慮したト音記号の譜面表示
+- 複数の練習範囲
+  - Basic: 初学者向けの低めの音域
+  - Standard: 6 弦開放から 1 弦 4 フレットまでの低ポジション
+  - Wide: 12 フレットまでを含む広めの範囲
+- 短期的な出題の偏りを抑えるシャッフル出題
+- 正答率と連続正解数の記録
+- レスポンシブ対応のブラウザ UI
 
-## Tech Stack
+## 技術スタック
 
 - React
 - Vite
 - lucide-react
 
-## Getting Started
+## 開発を始める
 
-Install dependencies:
+依存関係をインストールします。
 
 ```bash
 npm install
 ```
 
-Start the development server:
+開発サーバーを起動します。
 
 ```bash
 npm run dev
 ```
 
-Build for production:
+本番用にビルドします。
 
 ```bash
 npm run build
 ```
 
-Preview the production build locally:
+本番ビルドをローカルでプレビューします。
 
 ```bash
 npm run preview
@@ -55,9 +55,9 @@ npm run preview
 
 ## Azure Static Web Apps
 
-This project is ready to deploy as a static Vite app.
+このプロジェクトは、静的な Vite アプリとしてデプロイできます。
 
-Recommended build settings:
+推奨されるビルド設定は次のとおりです。
 
 ```text
 App location: /
@@ -65,8 +65,8 @@ Output location: dist
 Build command: npm run build
 ```
 
-`staticwebapp.config.json` includes a navigation fallback so the app can be served as a single-page application.
+`staticwebapp.config.json` にはナビゲーションフォールバックが含まれているため、シングルページアプリケーションとして配信できます。
 
-## Notes
+## 補足
 
-Classical guitar sounds one octave lower than written. The app accounts for this by displaying the written staff note while checking answers against the corresponding sounding pitch on the fretboard.
+クラシックギターは、記譜より 1 オクターブ低く鳴ります。このアプリでは、譜面上には記譜音を表示しつつ、回答判定では指板上の実音に対応する音を使っています。

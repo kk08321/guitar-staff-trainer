@@ -110,14 +110,32 @@ function drawQuestion(rangeKey, deck, avoidSoundingMidi = null) {
   };
 }
 
-function createPracticeState(rangeKey) {
-  const firstDraw = drawQuestion(rangeKey, createDeck(rangeKey));
-  const secondDraw = drawQuestion(rangeKey, firstDraw.deck, firstDraw.question.soundingMidi);
+function drawQuestions(rangeKey, deck, count, avoidSoundingMidi = null) {
+  const questions = [];
+  let remainingDeck = deck;
+  let previousSoundingMidi = avoidSoundingMidi;
+
+  for (let i = 0; i < count; i += 1) {
+    const draw = drawQuestion(rangeKey, remainingDeck, previousSoundingMidi);
+    questions.push(draw.question);
+    remainingDeck = draw.deck;
+    previousSoundingMidi = draw.question.soundingMidi;
+  }
 
   return {
-    question: firstDraw.question,
-    nextPreview: secondDraw.question,
-    deck: secondDraw.deck
+    questions,
+    deck: remainingDeck
+  };
+}
+
+function createPracticeState(rangeKey) {
+  const initialDraw = drawQuestions(rangeKey, createDeck(rangeKey), 4);
+  const [question, ...previewNotes] = initialDraw.questions;
+
+  return {
+    question,
+    previewNotes,
+    deck: initialDraw.deck
   };
 }
 
@@ -136,9 +154,9 @@ function getNoteLayout(note, x) {
   return { x, y, lowLedgerLines, highLedgerLines };
 }
 
-function StaffNote({ note, x, active = false, preview = false }) {
+function StaffNote({ note, x, active = false, preview = false, previewIndex = 0 }) {
   const layout = getNoteLayout(note, x);
-  const groupClass = active ? 'activeNote' : preview ? 'previewNote' : '';
+  const groupClass = active ? 'activeNote' : preview ? `previewNote previewNote${previewIndex + 1}` : '';
 
   return (
     <g className={groupClass}>
@@ -163,15 +181,15 @@ function StaffNote({ note, x, active = false, preview = false }) {
   );
 }
 
-function Staff({ note, nextNote, streak }) {
+function Staff({ note, previewNotes, streak }) {
   const staffLines = [0, 1, 2, 3, 4];
+  const previewPositions = [455, 550, 645];
 
   return (
     <section className="staffPanel" aria-label="出題されている五線譜">
       <div className="staffHeader">
         <div>
-          <span className="eyebrow">Now reading</span>
-          <h1>Guitar Solfeggio</h1>
+          <h1>Guitar staff trainer</h1>
         </div>
         <div className="streak" aria-label={`連続正解 ${streak}`}>
           <CheckCircle2 size={18} />
@@ -195,9 +213,17 @@ function Staff({ note, nextNote, streak }) {
             𝄞
           </text>
           <line x1="198" x2="198" y1="78" y2="150" className="barLine" />
-          <line x1="624" x2="624" y1="78" y2="150" className="barLine" />
-          <StaffNote key={nextNote.id} note={nextNote} x={560} preview />
-          <StaffNote key={note.id} note={note} x={365} active />
+          <line x1="706" x2="706" y1="78" y2="150" className="barLine" />
+          {previewNotes.map((previewNote, index) => (
+            <StaffNote
+              key={previewNote.id}
+              note={previewNote}
+              x={previewPositions[index]}
+              preview
+              previewIndex={index}
+            />
+          ))}
+          <StaffNote key={note.id} note={note} x={315} active />
         </svg>
       </div>
     </section>
@@ -261,7 +287,7 @@ function App() {
   const [selected, setSelected] = useState(null);
   const [status, setStatus] = useState('音符に対応する弦とフレットをタップ');
   const [score, setScore] = useState({ correct: 0, attempts: 0, streak: 0 });
-  const { question, nextPreview } = practice;
+  const { question, previewNotes } = practice;
 
   const answerText = useMemo(
     () => question.positions.map((position) => `${position.string}弦 ${position.fret}F`).join(' / '),
@@ -270,11 +296,15 @@ function App() {
 
   function nextQuestion(nextRangeKey = rangeKey) {
     setPractice((current) => {
-      const nextDraw = drawQuestion(nextRangeKey, current.deck, current.nextPreview.soundingMidi);
+      const nextDraw = drawQuestion(
+        nextRangeKey,
+        current.deck,
+        current.previewNotes[current.previewNotes.length - 1].soundingMidi
+      );
 
       return {
-        question: current.nextPreview,
-        nextPreview: nextDraw.question,
+        question: current.previewNotes[0],
+        previewNotes: [...current.previewNotes.slice(1), nextDraw.question],
         deck: nextDraw.deck
       };
     });
@@ -309,7 +339,7 @@ function App() {
 
   return (
     <main className="appShell">
-      <Staff note={question} nextNote={nextPreview} streak={score.streak} />
+      <Staff note={question} previewNotes={previewNotes} streak={score.streak} />
 
       <section className="controlBand" aria-label="練習設定と状態">
         <div className="metric">

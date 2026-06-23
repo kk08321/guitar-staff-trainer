@@ -21,13 +21,47 @@ const MAX_FRET = 12;
 const FFT_SIZE = 4096;
 const MIN_DETECT_MIDI = 36;
 const MAX_DETECT_MIDI = 84;
+const MIN_SPECTRUM_MIDI = 40;
+const MAX_SPECTRUM_MIDI = 76;
 const DEFAULT_SIGNAL_THRESHOLD = 42;
 const DEFAULT_VOLUME_GATE = 0.018;
 const DEFAULT_SENSITIVITY = 55;
-const STABLE_NOTE_DURATION_MS = 250;
+const STABLE_NOTE_DURATION_MS = 25;
 const DEFAULT_REFERENCE_PITCH = 442.0;
 const YIN_THRESHOLD = 0.14;
 const HPS_HARMONICS = 5;
+const HIGH_SENSITIVITY_START_MIDI = 55;
+const HIGH_SENSITIVITY_END_MIDI = 76;
+const HIGH_SIGNAL_THRESHOLD_REDUCTION = 0.35;
+const HIGH_VOLUME_GATE_REDUCTION = 0.4;
+const OCTAVE_UP_CORRECTION_MIN_MIDI = 59;
+const OCTAVE_UP_CORRECTION_MIN_LEVEL_RATIO = 0.65;
+const PHRASE_LENGTH = 8;
+const CHROMATIC_ACCENT_RATE = 0.42;
+
+const SCALE_PATTERNS = {
+  major: {
+    intervals: [0, 2, 4, 5, 7, 9, 11],
+    stableIntervals: [0, 4, 7]
+  },
+  minor: {
+    intervals: [0, 2, 3, 5, 7, 8, 10],
+    stableIntervals: [0, 3, 7]
+  }
+};
+
+const KEY_PRESETS = {
+  cMajor: { label: 'C major', root: 0, pattern: 'major' },
+  gMajor: { label: 'G major', root: 7, pattern: 'major' },
+  dMajor: { label: 'D major', root: 2, pattern: 'major' },
+  aMajor: { label: 'A major', root: 9, pattern: 'major' },
+  eMajor: { label: 'E major', root: 4, pattern: 'major' },
+  aMinor: { label: 'A minor', root: 9, pattern: 'minor' },
+  eMinor: { label: 'E minor', root: 4, pattern: 'minor' },
+  bMinor: { label: 'B minor', root: 11, pattern: 'minor' },
+  fsMinor: { label: 'F# minor', root: 6, pattern: 'minor' }
+};
+const DEFAULT_KEY_PRESET = 'cMajor';
 
 const RANGE_PRESETS = {
   easy: { label: '基礎', soundingMin: 40, soundingMax: 52, maxQuestionFret: 12 },
@@ -52,8 +86,28 @@ function frequencyToMidi(frequency, referencePitch = DEFAULT_REFERENCE_PITCH) {
   return Math.round(69 + 12 * Math.log2(frequency / referencePitch));
 }
 
+function frequencyToExactMidi(frequency, referencePitch = DEFAULT_REFERENCE_PITCH) {
+  return 69 + 12 * Math.log2(frequency / referencePitch);
+}
+
 function midiToFrequency(midi, referencePitch = DEFAULT_REFERENCE_PITCH) {
   return referencePitch * 2 ** ((midi - 69) / 12);
+}
+
+function getHighFrequencyBias(frequency, referencePitch = DEFAULT_REFERENCE_PITCH) {
+  const midi = frequencyToExactMidi(frequency, referencePitch);
+  const normalized = (midi - HIGH_SENSITIVITY_START_MIDI) / (HIGH_SENSITIVITY_END_MIDI - HIGH_SENSITIVITY_START_MIDI);
+  return Math.min(1, Math.max(0, normalized));
+}
+
+function getAdaptiveSignalThreshold(threshold, frequency, referencePitch = DEFAULT_REFERENCE_PITCH) {
+  const bias = getHighFrequencyBias(frequency, referencePitch);
+  return threshold * (1 - bias * HIGH_SIGNAL_THRESHOLD_REDUCTION);
+}
+
+function getAdaptiveVolumeGate(volumeGate, frequency, referencePitch = DEFAULT_REFERENCE_PITCH) {
+  const bias = getHighFrequencyBias(frequency, referencePitch);
+  return volumeGate * (1 - bias * HIGH_VOLUME_GATE_REDUCTION);
 }
 
 function getDetectionRange(referencePitch = DEFAULT_REFERENCE_PITCH) {
@@ -83,6 +137,20 @@ function getSpectrumPeak(frequencyData, sampleRate, referencePitch = DEFAULT_REF
     peakBin,
     peakValue
   };
+}
+
+function getSpectrumLevelAtFrequency(frequencyData, sampleRate, frequency) {
+  const nyquist = sampleRate / 2;
+  const centerBin = Math.round((frequency / nyquist) * frequencyData.length);
+  const minBin = Math.max(1, centerBin - 1);
+  const maxBin = Math.min(frequencyData.length - 1, centerBin + 1);
+  let level = 0;
+
+  for (let bin = minBin; bin <= maxBin; bin += 1) {
+    level = Math.max(level, frequencyData[bin] ?? 0);
+  }
+
+  return level;
 }
 
 function parabolicInterpolate(values, index) {
@@ -198,6 +266,10 @@ function isOctaveAbove(lowerMidi, higherMidi) {
   return higherMidi > lowerMidi && (higherMidi - lowerMidi) % 12 === 0;
 }
 
+function isOneOctaveAbove(lowerMidi, higherMidi) {
+  return higherMidi - lowerMidi === 12;
+}
+
 function getPitchDetection(
   frequencyData,
   timeData,
@@ -206,8 +278,9 @@ function getPitchDetection(
   signalThreshold = DEFAULT_SIGNAL_THRESHOLD
 ) {
   const spectrumPeak = getSpectrumPeak(frequencyData, sampleRate, referencePitch);
+  const adaptiveSignalThreshold = getAdaptiveSignalThreshold(signalThreshold, spectrumPeak.frequency, referencePitch);
 
-  if (spectrumPeak.peakValue < signalThreshold) {
+  if (spectrumPeak.peakValue < adaptiveSignalThreshold) {
     return null;
   }
 
@@ -215,12 +288,27 @@ function getPitchDetection(
   const hpsPitch = getHpsPitch(frequencyData, sampleRate, referencePitch);
   const yinMidi = yinPitch ? frequencyToMidi(yinPitch.frequency, referencePitch) : null;
   const hpsMidi = hpsPitch ? frequencyToMidi(hpsPitch.frequency, referencePitch) : null;
+  const peakMidi = frequencyToMidi(spectrumPeak.frequency, referencePitch);
   let frequency = yinPitch?.frequency ?? hpsPitch?.frequency ?? spectrumPeak.frequency;
   let source = yinPitch ? 'yin' : hpsPitch ? 'hps' : 'peak';
 
   if (yinPitch && hpsPitch && isOctaveAbove(yinMidi, hpsMidi)) {
-    frequency = yinPitch.frequency;
-    source = 'yin';
+    const hpsLevel = getSpectrumLevelAtFrequency(frequencyData, sampleRate, hpsPitch.frequency);
+    const hpsThreshold = getAdaptiveSignalThreshold(signalThreshold, hpsPitch.frequency, referencePitch);
+    const hasHighNoteEvidence = isOneOctaveAbove(yinMidi, hpsMidi)
+      && hpsMidi >= OCTAVE_UP_CORRECTION_MIN_MIDI
+      && hpsLevel >= hpsThreshold * OCTAVE_UP_CORRECTION_MIN_LEVEL_RATIO;
+
+    if (hasHighNoteEvidence) {
+      frequency = hpsPitch.frequency;
+      source = 'hps';
+    } else {
+      frequency = yinPitch.frequency;
+      source = 'yin';
+    }
+  } else if (yinPitch && isOneOctaveAbove(yinMidi, peakMidi) && peakMidi >= OCTAVE_UP_CORRECTION_MIN_MIDI) {
+    frequency = spectrumPeak.frequency;
+    source = 'peak';
   } else if (yinPitch && hpsPitch && isOctaveAbove(hpsMidi, yinMidi) && yinPitch.confidence < 0.92) {
     frequency = hpsPitch.frequency;
     source = 'hps';
@@ -288,17 +376,6 @@ function buildCandidates(rangeKey) {
   return candidates;
 }
 
-function shuffleCandidates(candidates) {
-  const shuffled = [...candidates];
-
-  for (let i = shuffled.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-
-  return shuffled;
-}
-
 function createQuestion(candidate) {
   return {
     ...candidate,
@@ -306,72 +383,175 @@ function createQuestion(candidate) {
   };
 }
 
-function createDeck(rangeKey, avoidSoundingMidi = null) {
-  const deck = shuffleCandidates(buildCandidates(rangeKey));
-
-  if (avoidSoundingMidi !== null && deck.length > 1 && deck[0].soundingMidi === avoidSoundingMidi) {
-    [deck[0], deck[1]] = [deck[1], deck[0]];
-  }
-
-  return deck;
+function getPitchClass(midi) {
+  return ((midi % 12) + 12) % 12;
 }
 
-function drawQuestion(rangeKey, deck, avoidSoundingMidi = null) {
-  let available = deck.length > 0 ? [...deck] : createDeck(rangeKey, avoidSoundingMidi);
+function getScalePitchClasses(keyPreset) {
+  const pattern = SCALE_PATTERNS[keyPreset.pattern];
+  return pattern.intervals.map((interval) => getPitchClass(keyPreset.root + interval));
+}
 
-  if (available.length > 1 && available[0].soundingMidi === avoidSoundingMidi) {
-    const replacementIndex = available.findIndex((candidate) => candidate.soundingMidi !== avoidSoundingMidi);
-    [available[0], available[replacementIndex]] = [available[replacementIndex], available[0]];
+function getStablePitchClasses(keyPreset) {
+  const pattern = SCALE_PATTERNS[keyPreset.pattern];
+  return pattern.stableIntervals.map((interval) => getPitchClass(keyPreset.root + interval));
+}
+
+function getChromaticApproachPitchClasses(scalePitchClasses) {
+  return scalePitchClasses
+    .map((pitchClass) => getPitchClass(pitchClass - 1))
+    .filter((pitchClass) => !scalePitchClasses.includes(pitchClass));
+}
+
+function weightedRandom(candidates, getWeight) {
+  const weighted = candidates.map((candidate) => ({
+    candidate,
+    weight: Math.max(0, getWeight(candidate))
+  }));
+  const total = weighted.reduce((sum, item) => sum + item.weight, 0);
+
+  if (total <= 0) {
+    return candidates[Math.floor(Math.random() * candidates.length)];
   }
 
-  const [candidate, ...remainingDeck] = available;
+  let target = Math.random() * total;
+
+  for (const item of weighted) {
+    target -= item.weight;
+
+    if (target <= 0) {
+      return item.candidate;
+    }
+  }
+
+  return weighted[weighted.length - 1].candidate;
+}
+
+function selectCandidate(candidates, avoidSoundingMidi = null, getWeight = () => 1) {
+  const available = candidates.filter((candidate) => candidate.soundingMidi !== avoidSoundingMidi);
+  const pool = available.length > 0 ? available : candidates;
+
+  if (pool.length === 0) {
+    return null;
+  }
+
+  return weightedRandom(pool, getWeight);
+}
+
+function getCandidateBySoundingMidi(candidates, soundingMidi, avoidSoundingMidi = null) {
+  if (soundingMidi === null || soundingMidi === avoidSoundingMidi) {
+    return null;
+  }
+
+  return candidates.find((candidate) => candidate.soundingMidi === soundingMidi) ?? null;
+}
+
+function getDiatonicWeight(candidate, phrasePosition, stablePitchClasses) {
+  const pitchClass = getPitchClass(candidate.soundingMidi);
+  const isStable = stablePitchClasses.includes(pitchClass);
+
+  if (phrasePosition === 0 || phrasePosition === 4) {
+    return isStable ? 5 : 1.4;
+  }
+
+  if (phrasePosition === PHRASE_LENGTH - 1) {
+    return isStable ? 7 : 1;
+  }
+
+  return isStable ? 2 : 1;
+}
+
+function drawQuestion(rangeKey, keyPresetKey, generator, avoidSoundingMidi = null) {
+  const candidates = buildCandidates(rangeKey);
+  const keyPreset = KEY_PRESETS[keyPresetKey] ?? KEY_PRESETS[DEFAULT_KEY_PRESET];
+  const scalePitchClasses = getScalePitchClasses(keyPreset);
+  const stablePitchClasses = getStablePitchClasses(keyPreset);
+  const chromaticApproachPitchClasses = getChromaticApproachPitchClasses(scalePitchClasses);
+  const phrasePosition = generator.phraseIndex % PHRASE_LENGTH;
+  const diatonicCandidates = candidates.filter((candidate) => scalePitchClasses.includes(getPitchClass(candidate.soundingMidi)));
+  const chromaticCandidates = candidates.filter((candidate) => chromaticApproachPitchClasses.includes(getPitchClass(candidate.soundingMidi)));
+  const pendingResolution = getCandidateBySoundingMidi(candidates, generator.pendingResolutionMidi, avoidSoundingMidi);
+  let candidate = phrasePosition === PHRASE_LENGTH - 1 ? pendingResolution : null;
+  let pendingResolutionMidi = phrasePosition === PHRASE_LENGTH - 1 ? null : generator.pendingResolutionMidi;
+
+  if (!candidate && phrasePosition === PHRASE_LENGTH - 2 && Math.random() < CHROMATIC_ACCENT_RATE) {
+    const resolvingChromaticCandidates = chromaticCandidates.filter((chromaticCandidate) => {
+      const resolutionMidi = chromaticCandidate.soundingMidi + 1;
+      return getCandidateBySoundingMidi(candidates, resolutionMidi) && scalePitchClasses.includes(getPitchClass(resolutionMidi));
+    });
+
+    candidate = selectCandidate(
+      resolvingChromaticCandidates,
+      avoidSoundingMidi,
+      (chromaticCandidate) => (stablePitchClasses.includes(getPitchClass(chromaticCandidate.soundingMidi + 1)) ? 3 : 1.6)
+    );
+    pendingResolutionMidi = candidate ? candidate.soundingMidi + 1 : null;
+  }
+
+  if (!candidate) {
+    candidate = selectCandidate(
+      diatonicCandidates,
+      avoidSoundingMidi,
+      (diatonicCandidate) => getDiatonicWeight(diatonicCandidate, phrasePosition, stablePitchClasses)
+    );
+    pendingResolutionMidi = phrasePosition === PHRASE_LENGTH - 1 ? null : pendingResolutionMidi;
+  }
+
+  if (!candidate) {
+    candidate = selectCandidate(candidates, avoidSoundingMidi);
+    pendingResolutionMidi = null;
+  }
 
   return {
     question: createQuestion(candidate),
-    deck: remainingDeck
+    generator: {
+      phraseIndex: generator.phraseIndex + 1,
+      pendingResolutionMidi
+    }
   };
 }
 
-function drawQuestions(rangeKey, deck, count, avoidSoundingMidi = null) {
+function drawQuestions(rangeKey, keyPresetKey, generator, count, avoidSoundingMidi = null) {
   const questions = [];
-  let remainingDeck = deck;
+  let currentGenerator = generator;
   let previousSoundingMidi = avoidSoundingMidi;
 
   for (let i = 0; i < count; i += 1) {
-    const draw = drawQuestion(rangeKey, remainingDeck, previousSoundingMidi);
+    const draw = drawQuestion(rangeKey, keyPresetKey, currentGenerator, previousSoundingMidi);
     questions.push(draw.question);
-    remainingDeck = draw.deck;
+    currentGenerator = draw.generator;
     previousSoundingMidi = draw.question.soundingMidi;
   }
 
   return {
     questions,
-    deck: remainingDeck
+    generator: currentGenerator
   };
 }
 
-function createPracticeState(rangeKey) {
-  const initialDraw = drawQuestions(rangeKey, createDeck(rangeKey), 4);
+function createPracticeState(rangeKey, keyPresetKey = DEFAULT_KEY_PRESET) {
+  const initialDraw = drawQuestions(rangeKey, keyPresetKey, { phraseIndex: 0, pendingResolutionMidi: null }, 4);
   const [question, ...previewNotes] = initialDraw.questions;
 
   return {
     question,
     previewNotes,
-    deck: initialDraw.deck
+    generator: initialDraw.generator
   };
 }
 
-function advancePracticeState(current, rangeKey) {
+function advancePracticeState(current, rangeKey, keyPresetKey = DEFAULT_KEY_PRESET) {
   const nextDraw = drawQuestion(
     rangeKey,
-    current.deck,
+    keyPresetKey,
+    current.generator,
     current.previewNotes[current.previewNotes.length - 1].soundingMidi
   );
 
   return {
     question: current.previewNotes[0],
     previewNotes: [...current.previewNotes.slice(1), nextDraw.question],
-    deck: nextDraw.deck
+    generator: nextDraw.generator
   };
 }
 
@@ -517,7 +697,16 @@ function Fretboard({ question, selected, onPick }) {
   );
 }
 
-function PracticeControls({ question, score, rangeKey, onRangeChange, onNext, noteValue = question.label }) {
+function PracticeControls({
+  question,
+  score,
+  rangeKey,
+  keyPresetKey,
+  onRangeChange,
+  onKeyPresetChange,
+  onNext,
+  noteValue = question.label
+}) {
   return (
     <section className="controlBand" aria-label="練習設定と状態">
       <div className="metric">
@@ -537,6 +726,16 @@ function PracticeControls({ question, score, rangeKey, onRangeChange, onNext, no
           </button>
         ))}
       </div>
+      <label className="keySelect">
+        <span>調性</span>
+        <select value={keyPresetKey} onChange={(event) => onKeyPresetChange(event.target.value)}>
+          {Object.entries(KEY_PRESETS).map(([key, preset]) => (
+            <option key={key} value={key}>
+              {preset.label}
+            </option>
+          ))}
+        </select>
+      </label>
       <button className="iconButton" type="button" onClick={onNext} aria-label="次の音符">
         <RotateCcw size={20} />
       </button>
@@ -551,7 +750,8 @@ const TABS = [
 
 function FretboardPractice() {
   const [rangeKey, setRangeKey] = useState('easy');
-  const [practice, setPractice] = useState(() => createPracticeState('easy'));
+  const [keyPresetKey, setKeyPresetKey] = useState(DEFAULT_KEY_PRESET);
+  const [practice, setPractice] = useState(() => createPracticeState('easy', DEFAULT_KEY_PRESET));
   const [selected, setSelected] = useState(null);
   const [status, setStatus] = useState('音符に対応する弦とフレットをタップ');
   const [score, setScore] = useState({ correct: 0, attempts: 0, streak: 0 });
@@ -562,8 +762,8 @@ function FretboardPractice() {
     [question]
   );
 
-  function nextQuestion(nextRangeKey = rangeKey) {
-    setPractice((current) => advancePracticeState(current, nextRangeKey));
+  function nextQuestion(nextRangeKey = rangeKey, nextKeyPresetKey = keyPresetKey) {
+    setPractice((current) => advancePracticeState(current, nextRangeKey, nextKeyPresetKey));
     setSelected(null);
     setStatus('音符に対応する弦とフレットをタップ');
   }
@@ -588,7 +788,14 @@ function FretboardPractice() {
 
   function handleRangeChange(nextRangeKey) {
     setRangeKey(nextRangeKey);
-    setPractice(createPracticeState(nextRangeKey));
+    setPractice(createPracticeState(nextRangeKey, keyPresetKey));
+    setSelected(null);
+    setStatus('音符に対応する弦とフレットをタップ');
+  }
+
+  function handleKeyPresetChange(nextKeyPresetKey) {
+    setKeyPresetKey(nextKeyPresetKey);
+    setPractice(createPracticeState(rangeKey, nextKeyPresetKey));
     setSelected(null);
     setStatus('音符に対応する弦とフレットをタップ');
   }
@@ -601,7 +808,9 @@ function FretboardPractice() {
         question={question}
         score={score}
         rangeKey={rangeKey}
+        keyPresetKey={keyPresetKey}
         onRangeChange={handleRangeChange}
+        onKeyPresetChange={handleKeyPresetChange}
         onNext={() => nextQuestion()}
       />
 
@@ -616,7 +825,8 @@ function FretboardPractice() {
 
 function AudioPractice() {
   const [rangeKey, setRangeKey] = useState('easy');
-  const [practice, setPractice] = useState(() => createPracticeState('easy'));
+  const [keyPresetKey, setKeyPresetKey] = useState(DEFAULT_KEY_PRESET);
+  const [practice, setPractice] = useState(() => createPracticeState('easy', DEFAULT_KEY_PRESET));
   const [status, setStatus] = useState('対応する実音を鳴らす');
   const [score, setScore] = useState({ correct: 0, attempts: 0, streak: 0 });
   const [isListening, setIsListening] = useState(false);
@@ -637,6 +847,7 @@ function AudioPractice() {
   const judgingRef = useRef(false);
   const questionRef = useRef(question);
   const rangeKeyRef = useRef(rangeKey);
+  const keyPresetKeyRef = useRef(keyPresetKey);
   const referencePitchRef = useRef(referencePitch);
   const detectionThresholdsRef = useRef(detectionThresholds);
 
@@ -649,6 +860,10 @@ function AudioPractice() {
   }, [rangeKey]);
 
   useEffect(() => {
+    keyPresetKeyRef.current = keyPresetKey;
+  }, [keyPresetKey]);
+
+  useEffect(() => {
     referencePitchRef.current = referencePitch;
   }, [referencePitch]);
 
@@ -658,8 +873,8 @@ function AudioPractice() {
 
   useEffect(() => () => stopListening(), []);
 
-  function nextQuestion(nextRangeKey = rangeKey) {
-    setPractice((current) => advancePracticeState(current, nextRangeKey));
+  function nextQuestion(nextRangeKey = rangeKey, nextKeyPresetKey = keyPresetKey) {
+    setPractice((current) => advancePracticeState(current, nextRangeKey, nextKeyPresetKey));
     setStatus('対応する実音を鳴らす');
     judgingRef.current = false;
     stableMidiRef.current = null;
@@ -668,7 +883,16 @@ function AudioPractice() {
 
   function handleRangeChange(nextRangeKey) {
     setRangeKey(nextRangeKey);
-    setPractice(createPracticeState(nextRangeKey));
+    setPractice(createPracticeState(nextRangeKey, keyPresetKey));
+    setStatus('対応する実音を鳴らす');
+    judgingRef.current = false;
+    stableMidiRef.current = null;
+    stableSinceRef.current = 0;
+  }
+
+  function handleKeyPresetChange(nextKeyPresetKey) {
+    setKeyPresetKey(nextKeyPresetKey);
+    setPractice(createPracticeState(rangeKey, nextKeyPresetKey));
     setStatus('対応する実音を鳴らす');
     judgingRef.current = false;
     stableMidiRef.current = null;
@@ -685,8 +909,16 @@ function AudioPractice() {
     const context = canvas.getContext('2d');
     const { width, height } = canvas;
     const barCount = 72;
-    const step = Math.max(1, Math.floor(frequencyData.length / 10 / barCount));
-    const highlightedBar = highlightedBin === null ? null : Math.floor(highlightedBin / step);
+    const minFrequency = midiToFrequency(MIN_SPECTRUM_MIDI, referencePitchRef.current);
+    const maxFrequency = midiToFrequency(MAX_SPECTRUM_MIDI, referencePitchRef.current);
+    const nyquist = (audioContextRef.current?.sampleRate ?? 44100) / 2;
+    const minBin = Math.max(1, Math.floor((minFrequency / nyquist) * frequencyData.length));
+    const maxBin = Math.min(frequencyData.length - 1, Math.ceil((maxFrequency / nyquist) * frequencyData.length));
+    const binSpan = Math.max(1, maxBin - minBin);
+    const highlightedBar =
+      highlightedBin === null || highlightedBin < minBin || highlightedBin > maxBin
+        ? null
+        : Math.floor(((highlightedBin - minBin) / binSpan) * barCount);
 
     context.clearRect(0, 0, width, height);
     context.fillStyle = '#11130f';
@@ -696,7 +928,14 @@ function AudioPractice() {
     const thresholdY = height - (signalThreshold / 255) * (height - 10);
 
     for (let i = 0; i < barCount; i += 1) {
-      const value = frequencyData[i * step] ?? 0;
+      const startBin = Math.floor(minBin + (i / barCount) * binSpan);
+      const endBin = Math.max(startBin + 1, Math.floor(minBin + ((i + 1) / barCount) * binSpan));
+      let value = 0;
+
+      for (let bin = startBin; bin <= Math.min(endBin, maxBin); bin += 1) {
+        value = Math.max(value, frequencyData[bin] ?? 0);
+      }
+
       const barHeight = Math.max(2, (value / 255) * (height - 10));
       const x = (i / barCount) * width;
       const barWidth = width / barCount - 2;
@@ -734,18 +973,20 @@ function AudioPractice() {
 
     setDetected(detection);
     judgingRef.current = true;
-    const isCorrect = detection.midi === questionRef.current.soundingMidi;
+    const targetMidi = questionRef.current.soundingMidi;
+    const isExactCorrect = detection.midi === targetMidi;
+    const isCorrect = getPitchClass(detection.midi) === getPitchClass(targetMidi);
 
     setScore((current) => ({
       correct: current.correct + (isCorrect ? 1 : 0),
       attempts: current.attempts + 1,
       streak: isCorrect ? current.streak + 1 : 0
     }));
-    setStatus(isCorrect ? `${detection.note.label} 正解` : `${detection.note.label} ではありません`);
+    setStatus(isCorrect ? `${detection.note.label} ${isExactCorrect ? '正解' : '音名正解'}` : `${detection.note.label} ではありません`);
 
     window.setTimeout(() => {
       if (isCorrect) {
-        nextQuestion(rangeKeyRef.current);
+        nextQuestion(rangeKeyRef.current, keyPresetKeyRef.current);
       } else {
         judgingRef.current = false;
         stableMidiRef.current = null;
@@ -773,15 +1014,6 @@ function AudioPractice() {
 
     const { signalThreshold, volumeGate } = detectionThresholdsRef.current;
 
-    if (rmsLevel < volumeGate) {
-      drawSpectrum(frequencyData);
-      setDetected(null);
-      stableMidiRef.current = null;
-      stableSinceRef.current = 0;
-      animationRef.current = window.requestAnimationFrame(analyseFrame);
-      return;
-    }
-
     const detection = getPitchDetection(
       frequencyData,
       timeData,
@@ -789,6 +1021,18 @@ function AudioPractice() {
       referencePitchRef.current,
       signalThreshold
     );
+    const adaptiveVolumeGate = detection
+      ? getAdaptiveVolumeGate(volumeGate, detection.frequency, referencePitchRef.current)
+      : volumeGate;
+
+    if (rmsLevel < adaptiveVolumeGate) {
+      drawSpectrum(frequencyData);
+      setDetected(null);
+      stableMidiRef.current = null;
+      stableSinceRef.current = 0;
+      animationRef.current = window.requestAnimationFrame(analyseFrame);
+      return;
+    }
 
     drawSpectrum(frequencyData, detection?.peakBin ?? null);
 
@@ -866,7 +1110,9 @@ function AudioPractice() {
         question={question}
         score={score}
         rangeKey={rangeKey}
+        keyPresetKey={keyPresetKey}
         onRangeChange={handleRangeChange}
+        onKeyPresetChange={handleKeyPresetChange}
         onNext={() => nextQuestion()}
         noteValue={question.soundingLabel}
       />

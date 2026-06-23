@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { RotateCcw, Music2, Gauge, CheckCircle2 } from 'lucide-react';
+import { RotateCcw, Music2, Gauge, CheckCircle2, Hand, Mic } from 'lucide-react';
 import './styles.css';
 
 const STRINGS = [
@@ -18,6 +18,14 @@ const DIATONIC_INDEX = { C: 0, D: 1, E: 2, F: 3, G: 4, A: 5, B: 6 };
 const STAFF_BASE_STEP = 2;
 const STAFF_BOTTOM_LINE_Y = 150;
 const MAX_FRET = 12;
+const FFT_SIZE = 4096;
+const MIN_DETECT_MIDI = 36;
+const MAX_DETECT_MIDI = 84;
+const DEFAULT_SIGNAL_THRESHOLD = 42;
+const DEFAULT_VOLUME_GATE = 0.018;
+const DEFAULT_SENSITIVITY = 55;
+const STABLE_NOTE_DURATION_MS = 750;
+const DEFAULT_REFERENCE_PITCH = 442.0;
 
 const RANGE_PRESETS = {
   easy: { label: '基礎', soundingMin: 40, soundingMax: 52, maxQuestionFret: 12 },
@@ -38,6 +46,64 @@ function midiToNote(midi) {
   };
 }
 
+function frequencyToMidi(frequency, referencePitch = DEFAULT_REFERENCE_PITCH) {
+  return Math.round(69 + 12 * Math.log2(frequency / referencePitch));
+}
+
+function midiToFrequency(midi, referencePitch = DEFAULT_REFERENCE_PITCH) {
+  return referencePitch * 2 ** ((midi - 69) / 12);
+}
+
+function getPeakDetection(frequencyData, sampleRate, referencePitch = DEFAULT_REFERENCE_PITCH, signalThreshold = DEFAULT_SIGNAL_THRESHOLD) {
+  const nyquist = sampleRate / 2;
+  const minFrequency = midiToFrequency(MIN_DETECT_MIDI, referencePitch);
+  const maxFrequency = midiToFrequency(MAX_DETECT_MIDI, referencePitch);
+  const minBin = Math.max(1, Math.floor((minFrequency / nyquist) * frequencyData.length));
+  const maxBin = Math.min(frequencyData.length - 1, Math.ceil((maxFrequency / nyquist) * frequencyData.length));
+  let peakBin = 0;
+  let peakValue = 0;
+
+  for (let bin = minBin; bin <= maxBin; bin += 1) {
+    if (frequencyData[bin] > peakValue) {
+      peakValue = frequencyData[bin];
+      peakBin = bin;
+    }
+  }
+
+  if (peakValue < signalThreshold) {
+    return null;
+  }
+
+  const frequency = (peakBin * nyquist) / frequencyData.length;
+  const midi = frequencyToMidi(frequency, referencePitch);
+
+  return {
+    frequency,
+    level: peakValue,
+    peakBin,
+    midi,
+    note: midiToNote(midi)
+  };
+}
+
+function getRmsLevel(timeData) {
+  const sumSquares = timeData.reduce((sum, value) => {
+    const normalized = (value - 128) / 128;
+    return sum + normalized * normalized;
+  }, 0);
+
+  return Math.sqrt(sumSquares / timeData.length);
+}
+
+function getDetectionThresholds(sensitivity) {
+  const normalized = sensitivity / 100;
+
+  return {
+    signalThreshold: Math.round(95 - normalized * 70),
+    volumeGate: 0.045 - normalized * 0.038
+  };
+}
+
 function getFretPositions(midi, maxFret = MAX_FRET) {
   return STRINGS.flatMap((string) => {
     const fret = midi - string.open;
@@ -53,11 +119,13 @@ function buildCandidates(rangeKey) {
     const positions = getFretPositions(soundingMidi, range.maxQuestionFret);
     if (positions.length > 0) {
       const writtenMidi = soundingMidi + 12;
+      const soundingNote = midiToNote(soundingMidi);
       candidates.push({
         ...midiToNote(writtenMidi),
         writtenMidi,
         soundingMidi,
-        soundingLabel: midiToNote(soundingMidi).label,
+        soundingLabel: soundingNote.label,
+        soundingName: soundingNote.name,
         positions
       });
     }
@@ -136,6 +204,20 @@ function createPracticeState(rangeKey) {
     question,
     previewNotes,
     deck: initialDraw.deck
+  };
+}
+
+function advancePracticeState(current, rangeKey) {
+  const nextDraw = drawQuestion(
+    rangeKey,
+    current.deck,
+    current.previewNotes[current.previewNotes.length - 1].soundingMidi
+  );
+
+  return {
+    question: current.previewNotes[0],
+    previewNotes: [...current.previewNotes.slice(1), nextDraw.question],
+    deck: nextDraw.deck
   };
 }
 
@@ -281,7 +363,39 @@ function Fretboard({ question, selected, onPick }) {
   );
 }
 
-function App() {
+function PracticeControls({ question, score, rangeKey, onRangeChange, onNext, noteValue = question.label }) {
+  return (
+    <section className="controlBand" aria-label="練習設定と状態">
+      <div className="metric">
+        <Music2 size={18} />
+        <span>{question.name}</span>
+        <strong>{noteValue}</strong>
+      </div>
+      <div className="metric">
+        <Gauge size={18} />
+        <span>正答率</span>
+        <strong>{score.attempts === 0 ? '--' : `${Math.round((score.correct / score.attempts) * 100)}%`}</strong>
+      </div>
+      <div className="segmented" role="group" aria-label="出題範囲">
+        {Object.entries(RANGE_PRESETS).map(([key, range]) => (
+          <button key={key} className={rangeKey === key ? 'active' : ''} type="button" onClick={() => onRangeChange(key)}>
+            {range.label}
+          </button>
+        ))}
+      </div>
+      <button className="iconButton" type="button" onClick={onNext} aria-label="次の音符">
+        <RotateCcw size={20} />
+      </button>
+    </section>
+  );
+}
+
+const TABS = [
+  { key: 'fretboard', label: '指板', icon: Hand },
+  { key: 'audio', label: '実音', icon: Mic }
+];
+
+function FretboardPractice() {
   const [rangeKey, setRangeKey] = useState('easy');
   const [practice, setPractice] = useState(() => createPracticeState('easy'));
   const [selected, setSelected] = useState(null);
@@ -295,19 +409,7 @@ function App() {
   );
 
   function nextQuestion(nextRangeKey = rangeKey) {
-    setPractice((current) => {
-      const nextDraw = drawQuestion(
-        nextRangeKey,
-        current.deck,
-        current.previewNotes[current.previewNotes.length - 1].soundingMidi
-      );
-
-      return {
-        question: current.previewNotes[0],
-        previewNotes: [...current.previewNotes.slice(1), nextDraw.question],
-        deck: nextDraw.deck
-      };
-    });
+    setPractice((current) => advancePracticeState(current, nextRangeKey));
     setSelected(null);
     setStatus('音符に対応する弦とフレットをタップ');
   }
@@ -341,28 +443,13 @@ function App() {
     <main className="appShell">
       <Staff note={question} previewNotes={previewNotes} streak={score.streak} />
 
-      <section className="controlBand" aria-label="練習設定と状態">
-        <div className="metric">
-          <Music2 size={18} />
-          <span>{question.name}</span>
-          <strong>{question.label}</strong>
-        </div>
-        <div className="metric">
-          <Gauge size={18} />
-          <span>正答率</span>
-          <strong>{score.attempts === 0 ? '--' : `${Math.round((score.correct / score.attempts) * 100)}%`}</strong>
-        </div>
-        <div className="segmented" role="group" aria-label="出題範囲">
-          {Object.entries(RANGE_PRESETS).map(([key, range]) => (
-            <button key={key} className={rangeKey === key ? 'active' : ''} type="button" onClick={() => handleRangeChange(key)}>
-              {range.label}
-            </button>
-          ))}
-        </div>
-        <button className="iconButton" type="button" onClick={() => nextQuestion()} aria-label="次の音符">
-          <RotateCcw size={20} />
-        </button>
-      </section>
+      <PracticeControls
+        question={question}
+        score={score}
+        rangeKey={rangeKey}
+        onRangeChange={handleRangeChange}
+        onNext={() => nextQuestion()}
+      />
 
       <div className={`statusLine ${selected ? 'visible' : ''}`} aria-live="polite">
         {status}
@@ -370,6 +457,338 @@ function App() {
 
       <Fretboard question={question} selected={selected} onPick={handlePick} />
     </main>
+  );
+}
+
+function AudioPractice() {
+  const [rangeKey, setRangeKey] = useState('easy');
+  const [practice, setPractice] = useState(() => createPracticeState('easy'));
+  const [status, setStatus] = useState('対応する実音を鳴らす');
+  const [score, setScore] = useState({ correct: 0, attempts: 0, streak: 0 });
+  const [isListening, setIsListening] = useState(false);
+  const [detected, setDetected] = useState(null);
+  const [audioError, setAudioError] = useState('');
+  const [referencePitch, setReferencePitch] = useState(DEFAULT_REFERENCE_PITCH);
+  const [sensitivity, setSensitivity] = useState(DEFAULT_SENSITIVITY);
+  const detectionThresholds = useMemo(() => getDetectionThresholds(sensitivity), [sensitivity]);
+  const { question, previewNotes } = practice;
+  const canvasRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const sourceRef = useRef(null);
+  const streamRef = useRef(null);
+  const animationRef = useRef(0);
+  const stableMidiRef = useRef(null);
+  const stableSinceRef = useRef(0);
+  const judgingRef = useRef(false);
+  const questionRef = useRef(question);
+  const rangeKeyRef = useRef(rangeKey);
+  const referencePitchRef = useRef(referencePitch);
+  const detectionThresholdsRef = useRef(detectionThresholds);
+
+  useEffect(() => {
+    questionRef.current = question;
+  }, [question]);
+
+  useEffect(() => {
+    rangeKeyRef.current = rangeKey;
+  }, [rangeKey]);
+
+  useEffect(() => {
+    referencePitchRef.current = referencePitch;
+  }, [referencePitch]);
+
+  useEffect(() => {
+    detectionThresholdsRef.current = detectionThresholds;
+  }, [detectionThresholds]);
+
+  useEffect(() => () => stopListening(), []);
+
+  function nextQuestion(nextRangeKey = rangeKey) {
+    setPractice((current) => advancePracticeState(current, nextRangeKey));
+    setStatus('対応する実音を鳴らす');
+    judgingRef.current = false;
+    stableMidiRef.current = null;
+    stableSinceRef.current = 0;
+  }
+
+  function handleRangeChange(nextRangeKey) {
+    setRangeKey(nextRangeKey);
+    setPractice(createPracticeState(nextRangeKey));
+    setStatus('対応する実音を鳴らす');
+    judgingRef.current = false;
+    stableMidiRef.current = null;
+    stableSinceRef.current = 0;
+  }
+
+  function drawSpectrum(frequencyData, highlightedBin = null) {
+    const canvas = canvasRef.current;
+
+    if (!canvas) {
+      return;
+    }
+
+    const context = canvas.getContext('2d');
+    const { width, height } = canvas;
+    const barCount = 72;
+    const step = Math.max(1, Math.floor(frequencyData.length / 10 / barCount));
+    const highlightedBar = highlightedBin === null ? null : Math.floor(highlightedBin / step);
+
+    context.clearRect(0, 0, width, height);
+    context.fillStyle = '#11130f';
+    context.fillRect(0, 0, width, height);
+
+    const { signalThreshold } = detectionThresholdsRef.current;
+    const thresholdY = height - (signalThreshold / 255) * (height - 10);
+
+    for (let i = 0; i < barCount; i += 1) {
+      const value = frequencyData[i * step] ?? 0;
+      const barHeight = Math.max(2, (value / 255) * (height - 10));
+      const x = (i / barCount) * width;
+      const barWidth = width / barCount - 2;
+      context.fillStyle = i === highlightedBar ? '#d3a13b' : value > signalThreshold ? '#2b7a78' : '#667173';
+      context.fillRect(x, height - barHeight, barWidth, barHeight);
+    }
+
+    context.strokeStyle = '#d8483e';
+    context.lineWidth = 2;
+    context.setLineDash([7, 5]);
+    context.beginPath();
+    context.moveTo(0, thresholdY);
+    context.lineTo(width, thresholdY);
+    context.stroke();
+    context.setLineDash([]);
+  }
+
+  function judgeDetectedMidi(detection) {
+    if (judgingRef.current) {
+      return false;
+    }
+
+    const now = performance.now();
+
+    if (stableMidiRef.current === detection.midi) {
+      if (now - stableSinceRef.current < STABLE_NOTE_DURATION_MS) {
+        return false;
+      }
+    } else {
+      stableMidiRef.current = detection.midi;
+      stableSinceRef.current = now;
+      setDetected(null);
+      return false;
+    }
+
+    setDetected(detection);
+    judgingRef.current = true;
+    const isCorrect = detection.midi === questionRef.current.soundingMidi;
+
+    setScore((current) => ({
+      correct: current.correct + (isCorrect ? 1 : 0),
+      attempts: current.attempts + 1,
+      streak: isCorrect ? current.streak + 1 : 0
+    }));
+    setStatus(isCorrect ? `${detection.note.label} 正解` : `${detection.note.label} ではありません`);
+
+    window.setTimeout(() => {
+      if (isCorrect) {
+        nextQuestion(rangeKeyRef.current);
+      } else {
+        judgingRef.current = false;
+        stableMidiRef.current = null;
+        stableSinceRef.current = 0;
+      }
+    }, isCorrect ? 520 : 700);
+
+    return true;
+  }
+
+  function analyseFrame() {
+    const analyser = analyserRef.current;
+    const audioContext = audioContextRef.current;
+
+    if (!analyser || !audioContext) {
+      return;
+    }
+
+    const frequencyData = new Uint8Array(analyser.frequencyBinCount);
+    const timeData = new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(timeData);
+    analyser.getByteFrequencyData(frequencyData);
+
+    const rmsLevel = getRmsLevel(timeData);
+
+    const { signalThreshold, volumeGate } = detectionThresholdsRef.current;
+
+    if (rmsLevel < volumeGate) {
+      drawSpectrum(frequencyData);
+      setDetected(null);
+      stableMidiRef.current = null;
+      stableSinceRef.current = 0;
+      animationRef.current = window.requestAnimationFrame(analyseFrame);
+      return;
+    }
+
+    const detection = getPeakDetection(
+      frequencyData,
+      audioContext.sampleRate,
+      referencePitchRef.current,
+      signalThreshold
+    );
+
+    drawSpectrum(frequencyData, detection?.peakBin ?? null);
+
+    if (detection) {
+      judgeDetectedMidi(detection);
+    } else {
+      setDetected(null);
+      stableMidiRef.current = null;
+      stableSinceRef.current = 0;
+    }
+
+    animationRef.current = window.requestAnimationFrame(analyseFrame);
+  }
+
+  async function startListening() {
+    setAudioError('');
+
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+
+      if (!navigator.mediaDevices?.getUserMedia || !AudioContextClass) {
+        throw new Error('Audio input is not supported');
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          autoGainControl: false,
+          echoCancellation: false,
+          noiseSuppression: false
+        }
+      });
+      const audioContext = new AudioContextClass();
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaStreamSource(stream);
+
+      analyser.fftSize = FFT_SIZE;
+      analyser.smoothingTimeConstant = 0.72;
+      source.connect(analyser);
+
+      audioContextRef.current = audioContext;
+      analyserRef.current = analyser;
+      sourceRef.current = source;
+      streamRef.current = stream;
+      setIsListening(true);
+      setStatus('マイク入力を解析中');
+      animationRef.current = window.requestAnimationFrame(analyseFrame);
+    } catch (error) {
+      setAudioError('マイクを開始できませんでした');
+      setStatus('マイク権限を確認してください');
+    }
+  }
+
+  function stopListening() {
+    window.cancelAnimationFrame(animationRef.current);
+    animationRef.current = 0;
+    sourceRef.current?.disconnect();
+    audioContextRef.current?.close();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    audioContextRef.current = null;
+    analyserRef.current = null;
+    sourceRef.current = null;
+    streamRef.current = null;
+    stableMidiRef.current = null;
+    stableSinceRef.current = 0;
+    judgingRef.current = false;
+    setIsListening(false);
+    setDetected(null);
+  }
+
+  return (
+    <main className="appShell">
+      <Staff note={question} previewNotes={previewNotes} streak={score.streak} />
+
+      <PracticeControls
+        question={question}
+        score={score}
+        rangeKey={rangeKey}
+        onRangeChange={handleRangeChange}
+        onNext={() => nextQuestion()}
+        noteValue={question.soundingLabel}
+      />
+
+      <div className="statusLine visible" aria-live="polite">
+        {status}
+      </div>
+
+      <section className="fftPanel" aria-label="FFT解析">
+        <div className="fftHeader">
+          <div className="detectedNote">
+            <span>検出音</span>
+            <strong>{detected ? detected.note.label : '--'}</strong>
+            <small>{detected ? `${Math.round(detected.frequency)}Hz` : audioError || '入力待ち'}</small>
+          </div>
+          <button className={`micButton ${isListening ? 'active' : ''}`} type="button" onClick={isListening ? stopListening : startListening}>
+            <Mic size={18} />
+            {isListening ? '停止' : 'マイク開始'}
+          </button>
+        </div>
+        <label className="pitchControl">
+          <span>A</span>
+          <input
+            type="number"
+            min="430"
+            max="450"
+            step="0.1"
+            value={referencePitch}
+            onChange={(event) => setReferencePitch(Number(event.target.value) || DEFAULT_REFERENCE_PITCH)}
+          />
+          <span>Hz</span>
+        </label>
+        <label className="sensitivityControl">
+          <span>感度</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={sensitivity}
+            onChange={(event) => setSensitivity(Number(event.target.value))}
+          />
+          <strong>{sensitivity}</strong>
+        </label>
+        <canvas ref={canvasRef} className="fftCanvas" width="720" height="190" />
+      </section>
+    </main>
+  );
+}
+
+function App() {
+  const [activeTab, setActiveTab] = useState('fretboard');
+
+  return (
+    <>
+      {activeTab === 'fretboard' ? <FretboardPractice /> : <AudioPractice />}
+
+      <nav className="bottomTabs" aria-label="練習モード">
+        {TABS.map((tab) => {
+          const Icon = tab.icon;
+          const isActive = activeTab === tab.key;
+
+          return (
+            <button
+              key={tab.key}
+              className={isActive ? 'active' : ''}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              aria-current={isActive ? 'page' : undefined}
+            >
+              <Icon size={20} />
+              <span>{tab.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+    </>
   );
 }
 

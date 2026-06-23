@@ -24,8 +24,10 @@ const MAX_DETECT_MIDI = 84;
 const DEFAULT_SIGNAL_THRESHOLD = 42;
 const DEFAULT_VOLUME_GATE = 0.018;
 const DEFAULT_SENSITIVITY = 55;
-const STABLE_NOTE_DURATION_MS = 750;
+const STABLE_NOTE_DURATION_MS = 250;
 const DEFAULT_REFERENCE_PITCH = 442.0;
+const YIN_THRESHOLD = 0.14;
+const HPS_HARMONICS = 5;
 
 const RANGE_PRESETS = {
   easy: { label: '基礎', soundingMin: 40, soundingMax: 52, maxQuestionFret: 12 },
@@ -54,10 +56,16 @@ function midiToFrequency(midi, referencePitch = DEFAULT_REFERENCE_PITCH) {
   return referencePitch * 2 ** ((midi - 69) / 12);
 }
 
-function getPeakDetection(frequencyData, sampleRate, referencePitch = DEFAULT_REFERENCE_PITCH, signalThreshold = DEFAULT_SIGNAL_THRESHOLD) {
+function getDetectionRange(referencePitch = DEFAULT_REFERENCE_PITCH) {
+  return {
+    minFrequency: midiToFrequency(MIN_DETECT_MIDI, referencePitch),
+    maxFrequency: midiToFrequency(MAX_DETECT_MIDI, referencePitch)
+  };
+}
+
+function getSpectrumPeak(frequencyData, sampleRate, referencePitch = DEFAULT_REFERENCE_PITCH) {
   const nyquist = sampleRate / 2;
-  const minFrequency = midiToFrequency(MIN_DETECT_MIDI, referencePitch);
-  const maxFrequency = midiToFrequency(MAX_DETECT_MIDI, referencePitch);
+  const { minFrequency, maxFrequency } = getDetectionRange(referencePitch);
   const minBin = Math.max(1, Math.floor((minFrequency / nyquist) * frequencyData.length));
   const maxBin = Math.min(frequencyData.length - 1, Math.ceil((maxFrequency / nyquist) * frequencyData.length));
   let peakBin = 0;
@@ -70,19 +78,165 @@ function getPeakDetection(frequencyData, sampleRate, referencePitch = DEFAULT_RE
     }
   }
 
-  if (peakValue < signalThreshold) {
+  return {
+    frequency: (peakBin * nyquist) / frequencyData.length,
+    peakBin,
+    peakValue
+  };
+}
+
+function parabolicInterpolate(values, index) {
+  const previous = values[index - 1] ?? values[index];
+  const current = values[index];
+  const next = values[index + 1] ?? values[index];
+  const divisor = previous - 2 * current + next;
+
+  if (Math.abs(divisor) < 1e-12) {
+    return index;
+  }
+
+  return index + (previous - next) / (2 * divisor);
+}
+
+function getYinPitch(timeData, sampleRate, referencePitch = DEFAULT_REFERENCE_PITCH) {
+  const { minFrequency, maxFrequency } = getDetectionRange(referencePitch);
+  const tauMin = Math.max(2, Math.floor(sampleRate / maxFrequency));
+  const tauMax = Math.min(timeData.length - 2, Math.ceil(sampleRate / minFrequency));
+  const samples = new Float32Array(timeData.length);
+  const difference = new Float32Array(tauMax + 1);
+  const cumulativeMean = new Float32Array(tauMax + 1);
+
+  for (let i = 0; i < timeData.length; i += 1) {
+    samples[i] = (timeData[i] - 128) / 128;
+  }
+
+  for (let tau = 1; tau <= tauMax; tau += 1) {
+    let sum = 0;
+    const sampleCount = timeData.length - tau;
+
+    for (let i = 0; i < sampleCount; i += 1) {
+      const delta = samples[i] - samples[i + tau];
+      sum += delta * delta;
+    }
+
+    difference[tau] = sum;
+  }
+
+  cumulativeMean[0] = 1;
+  let runningSum = 0;
+
+  for (let tau = 1; tau <= tauMax; tau += 1) {
+    runningSum += difference[tau];
+    cumulativeMean[tau] = runningSum === 0 ? 1 : (difference[tau] * tau) / runningSum;
+  }
+
+  for (let tau = tauMin; tau <= tauMax; tau += 1) {
+    if (cumulativeMean[tau] >= YIN_THRESHOLD) {
+      continue;
+    }
+
+    while (tau + 1 <= tauMax && cumulativeMean[tau + 1] < cumulativeMean[tau]) {
+      tau += 1;
+    }
+
+    const refinedTau = parabolicInterpolate(cumulativeMean, tau);
+    const frequency = sampleRate / refinedTau;
+
+    return {
+      frequency,
+      confidence: 1 - cumulativeMean[tau]
+    };
+  }
+
+  return null;
+}
+
+function getHpsPitch(frequencyData, sampleRate, referencePitch = DEFAULT_REFERENCE_PITCH) {
+  const nyquist = sampleRate / 2;
+  const { minFrequency, maxFrequency } = getDetectionRange(referencePitch);
+  const minBin = Math.max(1, Math.floor((minFrequency / nyquist) * frequencyData.length));
+  const maxBin = Math.min(
+    frequencyData.length - 1,
+    Math.ceil((maxFrequency / nyquist) * frequencyData.length),
+    Math.floor((frequencyData.length - 1) / HPS_HARMONICS)
+  );
+  const scores = new Float32Array(frequencyData.length);
+  let bestBin = 0;
+  let bestScore = -Infinity;
+
+  for (let bin = minBin; bin <= maxBin; bin += 1) {
+    let score = 0;
+
+    for (let harmonic = 1; harmonic <= HPS_HARMONICS; harmonic += 1) {
+      const value = frequencyData[bin * harmonic] / 255;
+      score += Math.log(0.02 + value) / harmonic;
+    }
+
+    scores[bin] = score;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestBin = bin;
+    }
+  }
+
+  if (bestBin === 0) {
     return null;
   }
 
-  const frequency = (peakBin * nyquist) / frequencyData.length;
-  const midi = frequencyToMidi(frequency, referencePitch);
+  const refinedBin = parabolicInterpolate(scores, bestBin);
+  const frequency = (refinedBin * nyquist) / frequencyData.length;
 
   return {
     frequency,
-    level: peakValue,
+    peakBin: Math.round(refinedBin),
+    score: bestScore
+  };
+}
+
+function isOctaveAbove(lowerMidi, higherMidi) {
+  return higherMidi > lowerMidi && (higherMidi - lowerMidi) % 12 === 0;
+}
+
+function getPitchDetection(
+  frequencyData,
+  timeData,
+  sampleRate,
+  referencePitch = DEFAULT_REFERENCE_PITCH,
+  signalThreshold = DEFAULT_SIGNAL_THRESHOLD
+) {
+  const spectrumPeak = getSpectrumPeak(frequencyData, sampleRate, referencePitch);
+
+  if (spectrumPeak.peakValue < signalThreshold) {
+    return null;
+  }
+
+  const yinPitch = getYinPitch(timeData, sampleRate, referencePitch);
+  const hpsPitch = getHpsPitch(frequencyData, sampleRate, referencePitch);
+  const yinMidi = yinPitch ? frequencyToMidi(yinPitch.frequency, referencePitch) : null;
+  const hpsMidi = hpsPitch ? frequencyToMidi(hpsPitch.frequency, referencePitch) : null;
+  let frequency = yinPitch?.frequency ?? hpsPitch?.frequency ?? spectrumPeak.frequency;
+  let source = yinPitch ? 'yin' : hpsPitch ? 'hps' : 'peak';
+
+  if (yinPitch && hpsPitch && isOctaveAbove(yinMidi, hpsMidi)) {
+    frequency = yinPitch.frequency;
+    source = 'yin';
+  } else if (yinPitch && hpsPitch && isOctaveAbove(hpsMidi, yinMidi) && yinPitch.confidence < 0.92) {
+    frequency = hpsPitch.frequency;
+    source = 'hps';
+  }
+
+  const midi = frequencyToMidi(frequency, referencePitch);
+  const nyquist = sampleRate / 2;
+  const peakBin = Math.round((frequency / nyquist) * frequencyData.length);
+
+  return {
+    frequency,
+    level: spectrumPeak.peakValue,
     peakBin,
     midi,
-    note: midiToNote(midi)
+    note: midiToNote(midi),
+    source
   };
 }
 
@@ -628,8 +782,9 @@ function AudioPractice() {
       return;
     }
 
-    const detection = getPeakDetection(
+    const detection = getPitchDetection(
       frequencyData,
+      timeData,
       audioContext.sampleRate,
       referencePitchRef.current,
       signalThreshold

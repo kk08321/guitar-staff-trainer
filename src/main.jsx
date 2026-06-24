@@ -451,8 +451,8 @@ function StaffNote({ note, x, active = false, preview = false, previewIndex = 0 
         <line key={`high-${i}`} x1={layout.x - 22} x2={layout.x + 22} y1={60 - i * 18} y2={60 - i * 18} className="ledger" />
       ))}
       {note.accidental && (
-        <text x={layout.x - 46} y={layout.y + 7} className="accidental">
-          #
+        <text x={layout.x - 40} y={layout.y + 12} className="accidental">
+          ♯
         </text>
       )}
       <ellipse cx={layout.x} cy={layout.y} rx="15" ry="10.5" transform={`rotate(-18 ${layout.x} ${layout.y})`} className="noteHead" />
@@ -993,7 +993,7 @@ function AudioPractice() {
           </div>
           <button className={`micButton ${isListening ? 'active' : ''}`} type="button" onClick={isListening ? stopListening : startListening}>
             <Mic size={18} />
-            {isListening ? '停止' : 'マイク開始'}
+            {isListening ? 'マイクOFF' : 'マイクON'}
           </button>
         </div>
         <label className="pitchControl">

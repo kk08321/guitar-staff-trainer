@@ -135,7 +135,8 @@ h1 {
 
 .accidental {
   fill: #293033;
-  font-size: 34px;
+  font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Music", "Noto Sans Symbols 2", Georgia, serif;
+  font-size: 46px;
   font-weight: 900;
 }
 

@@ -27,6 +27,12 @@ const DEFAULT_SIGNAL_THRESHOLD = 42;
 const DEFAULT_VOLUME_GATE = 0.018;
 const DEFAULT_SENSITIVITY = 55;
 const STABLE_NOTE_DURATION_MS = 50;
+const DEFAULT_CORRECT_DELAY_KEY = 'standard';
+const CORRECT_DELAY_PRESETS = {
+  quick: { label: '速い', ms: 180 },
+  standard: { label: '標準', ms: 320 },
+  slow: { label: 'ゆっくり', ms: 520 }
+};
 const DEFAULT_REFERENCE_PITCH = 442.0;
 const HPS_HARMONICS = 5;
 const PHRASE_LENGTH = 8;
@@ -61,6 +67,7 @@ const RANGE_PRESETS = {
   normal: { label: '標準', soundingMin: 40, soundingMax: 68, maxQuestionFret: 4 },
   full: { label: '広め', soundingMin: 40, soundingMax: 76, maxQuestionFret: 12 }
 };
+const DEFAULT_RANGE_KEY = 'normal';
 
 function midiToNote(midi) {
   const octave = Math.floor(midi / 12) - 1;
@@ -440,6 +447,8 @@ function getNoteLayout(note, x) {
 
 function StaffNote({ note, x, active = false, preview = false, previewIndex = 0 }) {
   const layout = getNoteLayout(note, x);
+  const stemDown = layout.y <= 114;
+  const stemX = stemDown ? layout.x - 14 : layout.x + 14;
   const groupClass = active ? 'activeNote' : preview ? `previewNote previewNote${previewIndex + 1}` : '';
 
   return (
@@ -456,11 +465,23 @@ function StaffNote({ note, x, active = false, preview = false, previewIndex = 0 
         </text>
       )}
       <ellipse cx={layout.x} cy={layout.y} rx="15" ry="10.5" transform={`rotate(-18 ${layout.x} ${layout.y})`} className="noteHead" />
-      <line x1={layout.x + 14} y1={layout.y - 6} x2={layout.x + 14} y2={layout.y - 62} className="stem" />
-      <path
-        d={`M${layout.x + 14} ${layout.y - 62} C ${layout.x + 43} ${layout.y - 58}, ${layout.x + 48} ${layout.y - 40}, ${layout.x + 24} ${layout.y - 27} C ${layout.x + 48} ${layout.y - 51}, ${layout.x + 39} ${layout.y - 62}, ${layout.x + 14} ${layout.y - 69} Z`}
-        className="eighthFlag"
-      />
+      {stemDown ? (
+        <>
+          <line x1={stemX} y1={layout.y + 6} x2={stemX} y2={layout.y + 62} className="stem" />
+          <path
+            d={`M${stemX} ${layout.y + 62} C ${stemX + 29} ${layout.y + 56}, ${stemX + 35} ${layout.y + 42}, ${stemX + 12} ${layout.y + 31} C ${stemX + 34} ${layout.y + 50}, ${stemX + 24} ${layout.y + 63}, ${stemX} ${layout.y + 70} Z`}
+            className="eighthFlag"
+          />
+        </>
+      ) : (
+        <>
+          <line x1={stemX} y1={layout.y - 6} x2={stemX} y2={layout.y - 62} className="stem" />
+          <path
+            d={`M${stemX} ${layout.y - 62} C ${stemX + 29} ${layout.y - 58}, ${stemX + 34} ${layout.y - 40}, ${stemX + 10} ${layout.y - 27} C ${stemX + 34} ${layout.y - 51}, ${stemX + 25} ${layout.y - 62}, ${stemX} ${layout.y - 69} Z`}
+            className="eighthFlag"
+          />
+        </>
+      )}
     </g>
   );
 }
@@ -570,8 +591,10 @@ function PracticeControls({
   score,
   rangeKey,
   keyPresetKey,
+  correctDelayKey,
   onRangeChange,
   onKeyPresetChange,
+  onCorrectDelayChange,
   onNext,
   noteValue = question.label
 }) {
@@ -604,6 +627,16 @@ function PracticeControls({
           ))}
         </select>
       </label>
+      <label className="delaySelect">
+        <span>次問</span>
+        <select value={correctDelayKey} onChange={(event) => onCorrectDelayChange(event.target.value)}>
+          {Object.entries(CORRECT_DELAY_PRESETS).map(([key, preset]) => (
+            <option key={key} value={key}>
+              {preset.label}
+            </option>
+          ))}
+        </select>
+      </label>
       <button className="iconButton" type="button" onClick={onNext} aria-label="次の音符">
         <RotateCcw size={20} />
       </button>
@@ -616,10 +649,10 @@ const TABS = [
   { key: 'audio', label: '実音', icon: Mic }
 ];
 
-function FretboardPractice() {
-  const [rangeKey, setRangeKey] = useState('easy');
+function FretboardPractice({ correctDelayKey, correctDelayMs, onCorrectDelayChange }) {
+  const [rangeKey, setRangeKey] = useState(DEFAULT_RANGE_KEY);
   const [keyPresetKey, setKeyPresetKey] = useState(DEFAULT_KEY_PRESET);
-  const [practice, setPractice] = useState(() => createPracticeState('easy', DEFAULT_KEY_PRESET));
+  const [practice, setPractice] = useState(() => createPracticeState(DEFAULT_RANGE_KEY, DEFAULT_KEY_PRESET));
   const [selected, setSelected] = useState(null);
   const [status, setStatus] = useState('音符に対応する弦とフレットをタップ');
   const [score, setScore] = useState({ correct: 0, attempts: 0, streak: 0 });
@@ -647,7 +680,7 @@ function FretboardPractice() {
 
     if (isCorrect) {
       setStatus(`${question.label} 正解`);
-      window.setTimeout(() => nextQuestion(), 520);
+      window.setTimeout(() => nextQuestion(), correctDelayMs);
       return;
     }
 
@@ -677,8 +710,10 @@ function FretboardPractice() {
         score={score}
         rangeKey={rangeKey}
         keyPresetKey={keyPresetKey}
+        correctDelayKey={correctDelayKey}
         onRangeChange={handleRangeChange}
         onKeyPresetChange={handleKeyPresetChange}
+        onCorrectDelayChange={onCorrectDelayChange}
         onNext={() => nextQuestion()}
       />
 
@@ -691,10 +726,10 @@ function FretboardPractice() {
   );
 }
 
-function AudioPractice() {
-  const [rangeKey, setRangeKey] = useState('easy');
+function AudioPractice({ correctDelayKey, correctDelayMs, onCorrectDelayChange }) {
+  const [rangeKey, setRangeKey] = useState(DEFAULT_RANGE_KEY);
   const [keyPresetKey, setKeyPresetKey] = useState(DEFAULT_KEY_PRESET);
-  const [practice, setPractice] = useState(() => createPracticeState('easy', DEFAULT_KEY_PRESET));
+  const [practice, setPractice] = useState(() => createPracticeState(DEFAULT_RANGE_KEY, DEFAULT_KEY_PRESET));
   const [status, setStatus] = useState('対応する実音を鳴らす');
   const [score, setScore] = useState({ correct: 0, attempts: 0, streak: 0 });
   const [isListening, setIsListening] = useState(false);
@@ -859,7 +894,7 @@ function AudioPractice() {
         stableMidiRef.current = null;
         stableSinceRef.current = 0;
       }
-    }, isCorrect ? 520 : 700);
+    }, isCorrect ? correctDelayMs : 700);
 
     return true;
   }
@@ -974,8 +1009,10 @@ function AudioPractice() {
         score={score}
         rangeKey={rangeKey}
         keyPresetKey={keyPresetKey}
+        correctDelayKey={correctDelayKey}
         onRangeChange={handleRangeChange}
         onKeyPresetChange={handleKeyPresetChange}
+        onCorrectDelayChange={onCorrectDelayChange}
         onNext={() => nextQuestion()}
         noteValue={question.soundingLabel}
       />
@@ -1028,10 +1065,16 @@ function AudioPractice() {
 
 function App() {
   const [activeTab, setActiveTab] = useState('fretboard');
+  const [correctDelayKey, setCorrectDelayKey] = useState(DEFAULT_CORRECT_DELAY_KEY);
+  const correctDelayMs = CORRECT_DELAY_PRESETS[correctDelayKey].ms;
 
   return (
     <>
-      {activeTab === 'fretboard' ? <FretboardPractice /> : <AudioPractice />}
+      {activeTab === 'fretboard' ? (
+        <FretboardPractice correctDelayKey={correctDelayKey} correctDelayMs={correctDelayMs} onCorrectDelayChange={setCorrectDelayKey} />
+      ) : (
+        <AudioPractice correctDelayKey={correctDelayKey} correctDelayMs={correctDelayMs} onCorrectDelayChange={setCorrectDelayKey} />
+      )}
 
       <nav className="bottomTabs" aria-label="練習モード">
         {TABS.map((tab) => {
